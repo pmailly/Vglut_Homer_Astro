@@ -159,7 +159,9 @@ public class Vglut_Homer_Astrocyte implements PlugIn {
     /** 
      * Find sted dots
      * @param img channel
-     * @return ArrayList<Point3D> stedDots
+     * @param maxTol
+     * @param imageNum
+     * @return 
      */
     public ArrayList<Point3D> findStedDots(ImagePlus img, String maxTol, int imageNum) {
         if (median)
