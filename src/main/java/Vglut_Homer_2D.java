@@ -13,7 +13,6 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -43,7 +42,11 @@ import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
 import net.haesleinhuepf.clij.clearcl.ClearCLBuffer;
 import net.haesleinhuepf.clij2.CLIJ2;
 import Vglut_Stardist.StarDist2D;
-import java.nio.file.StandardCopyOption;
+import ij.process.AutoThresholder;
+import java.awt.Color;
+import java.awt.Font;
+import java.io.FilenameFilter;
+import mcib3d.image3d.ImageLabeller;
 import net.imglib2.RandomAccessibleInterval;
 import net.imglib2.img.Img;
 import net.imglib2.img.display.imagej.ImageJFunctions;
@@ -59,8 +62,11 @@ public class Vglut_Homer_2D implements PlugIn {
     private BufferedWriter outPutResults;
     private final ImageIcon icon = new ImageIcon(this.getClass().getResource("/Orion_icon.png"));
     
-    public double minDots = 0.1;
+    public double minDots = 0.01;
     public double maxDots = 0.5;
+    public String[] dotsDetectors = {"StarDist","DOG"};
+    public String dotsDetector = "StarDist";
+    public File modelsPath = new File(IJ.getDirectory("imagej")+File.separator+"models");
     
     // Stardist
     public Object syncObject = new Object();
@@ -70,7 +76,16 @@ public class Vglut_Homer_2D implements PlugIn {
     public final double stardistOverlayThreshDots = 0.35;
     public String stardistOutput = "Label Image"; 
     public String starDistModel = "";
-
+    
+    // DOG detections
+    private String[] thMeths = AutoThresholder.getMethods();
+    private String ch0ThMet = thMeths[10];
+    public int ch0DogRadius1 = 2;
+    public int ch0DogRadius2 = 4;
+    private String ch1ThMet = thMeths[3];
+    public int ch1DogRadius1 = 1;
+    public int ch1DogRadius2 = 2;
+    
     public CLIJ2 clij2 = CLIJ2.getInstance();
     
     
@@ -102,19 +117,68 @@ public class Vglut_Homer_2D implements PlugIn {
 
     private boolean dialog() {
         canceled = true;
-        String[] stardistModels = {"MODEL_DSB2018_HEAVY_AUGMENTATION", "MODEL_PMLS"};
+        String[] models = findStardistModels();
         GenericDialogPlus gd = new GenericDialogPlus("Parameters");
         gd.setInsets​(0, 180, 0);
         gd.addImage(icon);
         gd.addDirectoryField("Choose images directory", imageDir);
-        gd.addFileField("Model file :", starDistModel);
+        gd.addMessage("Dots detection method", Font.getFont("Monospace"), Color.blue);
+        gd.addChoice("Dots segmentation method :",dotsDetectors, dotsDetectors[0]);
+        gd.addMessage("StarDist model", Font.getFont("Monospace"), Color.blue);
+        if (models.length >= 2) {
+            gd.addChoice("StarDist model :",models, models[0]);
+        }
+        else {
+            gd.addMessage("No StarDist model found in Fiji !!", Font.getFont("Monospace"), Color.red);
+            gd.addFileField("StarDist model :", starDistModel);
+        }
+        gd.addMessage("DOG dots detection", Font.getFont("Monospace"), Color.blue);
+        gd.addMessage("Channel 0", Font.getFont("Monospace"), Color.black);
+        gd.addChoice("Threshold method   :",thMeths, ch0ThMet);
+        gd.addNumericField("DOG radius 1 :", ch0DogRadius1);
+        gd.addNumericField("DOG radius 2 :", ch0DogRadius2);
+        gd.addMessage("Channel 1", Font.getFont("Monospace"), Color.black);
+        gd.addChoice("Threshold method   :",thMeths, ch1ThMet);
+        gd.addNumericField("DOG radius 1 :", ch1DogRadius1);
+        gd.addNumericField("DOG radius 2 :", ch1DogRadius2);
         gd.showDialog();
         if (gd.wasCanceled())
             canceled = false;
         imageDir = gd.getNextString()+ File.separator;
-        starDistModel = gd.getNextString();
+        dotsDetector = gd.getNextChoice();
+        if (models.length >= 2) {
+            starDistModel = modelsPath+File.separator+gd.getNextChoice();
+        }
+        else {
+            starDistModel = gd.getNextString();
+        }
+        if (dotsDetector.equals("StarDist") && starDistModel.isEmpty()) {
+            IJ.error("No model specify !!");
+            canceled = true;
+        }
+        ch0ThMet = gd.getNextChoice();
+        ch0DogRadius1 = (int)gd.getNextNumber();
+        ch0DogRadius2 = (int)gd.getNextNumber();
+        ch1ThMet = gd.getNextChoice();
+        ch1DogRadius1 = (int)gd.getNextNumber();
+        ch1DogRadius2 = (int)gd.getNextNumber();
         return(canceled);
     }
+    
+    
+    /*
+    Find starDist models in Fiji models folder
+    */
+    private String[] findStardistModels() {
+        FilenameFilter filter = (dir, name) -> name.endsWith(".zip");
+        File[] modelList = modelsPath.listFiles(filter);
+        String[] models = new String[modelList.length];
+        for (int i = 0; i < modelList.length; i++) {
+            models[i] = modelList[i].getName();
+        }
+        return(models);
+    }
+    
     
      /**  
      * median 3D box filter
@@ -159,6 +223,61 @@ public class Vglut_Homer_2D implements PlugIn {
         imgLab.close();
         return(dotsFilter);
     } 
+    
+    /** 
+     * Find dots with DOG CLIJ Method
+     * @param img channel
+     * @return dots population
+     */
+    public Objects3DPopulation findDotsDoGCLIJ(ImagePlus img, int dogRadius1, int dogRadius2, String thMet) {
+        ClearCLBuffer imgCL = clij2.push(img);
+        ClearCLBuffer imgCLDOG = DOG(imgCL, dogRadius1, dogRadius2);
+        clij2.release(imgCL);
+        ImagePlus imgBin = clij2.pull(threshold(imgCLDOG, thMet));
+        clij2.release(imgCLDOG);
+        imgBin.setCalibration(img.getCalibration());
+        Objects3DPopulation pmlPop = new Objects3DPopulation(getPopFromImage(imgBin).getObjectsWithinVolume(minDots, maxDots, true));
+        imgBin.close();
+        return(pmlPop);
+    } 
+    
+    
+    public Objects3DPopulation getPopFromImage(ImagePlus img) {
+        // label binary images first
+        ImageLabeller labeller = new ImageLabeller();
+        ImageInt labels = labeller.getLabels(ImageHandler.wrap(img));
+        Objects3DPopulation pop = new Objects3DPopulation(labels);
+        return pop;
+    }
+    
+   
+    /**
+     * Threshold 
+     * USING CLIJ2
+     * @param imgCL
+     * @param thMed
+     * @param fill 
+     */
+    public ClearCLBuffer threshold(ClearCLBuffer imgCL, String thMed) {
+        ClearCLBuffer imgCLBin = clij2.create(imgCL);
+        clij2.automaticThreshold(imgCL, imgCLBin, thMed);
+        return(imgCLBin);
+    }
+    
+    /**
+     * Difference of Gaussians 
+     * Using CLIJ2
+     * @param imgCL
+     * @param size1
+     * @param size2
+     * @return imgGauss
+     */ 
+    public ClearCLBuffer DOG(ClearCLBuffer imgCL, double size1, double size2) {
+        ClearCLBuffer imgCLDOG = clij2.create(imgCL);
+        clij2.differenceOfGaussian2D(imgCL, imgCLDOG, size1, size1, size2, size2);
+        clij2.release(imgCL);
+        return(imgCLDOG);
+    }
     
         
      /**
@@ -338,17 +457,30 @@ public class Vglut_Homer_2D implements PlugIn {
                         options.setSeriesOn(1, true);
                         ImagePlus imgHomer = BF.openImagePlus(options)[0];
                         cal = imgHomer.getCalibration();
-                        IJ.showStatus("Finding homer dots ...");
-                        Objects3DPopulation homerPop = stardistDotsPop(imgHomer);
+                        Objects3DPopulation homerPop = new Objects3DPopulation();
+                        if (dotsDetector.equals("StarDist")) {
+                            IJ.showStatus("Finding homer dots with StarDist...");
+                            homerPop = stardistDotsPop(imgHomer);
+                        }
+                        else {
+                            IJ.showStatus("Finding homer dots with DOG ...");
+                            homerPop = findDotsDoGCLIJ(imgHomer, ch1DogRadius1, ch1DogRadius2, ch1ThMet);
+                        }
                         System.out.println(homerPop.getNbObjects()+" homer dots");
                         
                         // Find vglut
                         options.setSeriesOn(0, true);
                         ImagePlus imgVglut = BF.openImagePlus(options)[0];
-                        IJ.showStatus("Finding vglut dots ...");
-                        Objects3DPopulation vglutPop = stardistDotsPop(imgVglut);
+                        Objects3DPopulation vglutPop = new Objects3DPopulation();
+                        if (dotsDetector.equals("StarDist")) {
+                            IJ.showStatus("Finding Vglut dots with StarDist...");
+                            vglutPop = stardistDotsPop(imgVglut);
+                        }
+                        else {
+                            IJ.showStatus("Finding Vglut dots with DOG...");
+                            vglutPop = findDotsDoGCLIJ(imgVglut, ch1DogRadius1, ch0DogRadius2, ch0ThMet);
+                        }
                         System.out.println(vglutPop.getNbObjects()+" vglut dots");
-                        
                         // Find synapses
                         IJ.showStatus("Finding synapses ...");
                         ArrayList<Point3D> synapses = findSynapses(vglutPop, homerPop);
@@ -375,12 +507,6 @@ public class Vglut_Homer_2D implements PlugIn {
             IJ.showStatus("Process done");
         } catch (IOException ex) {
             Logger.getLogger(Vglut_Homer_2D.class.getName()).log(Level.SEVERE, null, ex);
-        } finally {
-            try {
-                fileResults.close();
-            } catch (IOException ex) {
-                Logger.getLogger(Vglut_Homer_2D.class.getName()).log(Level.SEVERE, null, ex);
-            }
-        }
+        } 
     }    
 }
